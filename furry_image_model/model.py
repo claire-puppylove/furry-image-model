@@ -5,7 +5,10 @@ import pathlib
 import numpy as np
 import tensorflow as tf
 from sklearn.preprocessing import MultiLabelBinarizer
-
+from tensorflow.python.keras.saving import saved_model
+from tensorflow.python.keras.protobuf import saved_metadata_pb2
+from tensorflow.python.saved_model import loader_impl
+from tensorflow.python.platform import gfile
 
 file_path = pathlib.Path(__file__).parent.resolve()
 
@@ -16,37 +19,49 @@ class FurryImageModel:
         Args:
             model_path (str | os.PathLike): The path of the TensorFlow SavedModel model.
         """
-        # load tf config for metadata on model
-        if tf.saved_model.contains_saved_model(model_path):
-            # new keras 3 does not load saved models, but we can still load the metadata as
-            # JSON from the keras_metadata.pb
+        self.contains_saved_model = tf.saved_model.contains_saved_model(model_path)
+        if self.contains_saved_model:
+            # load tf config for metadata on model
+            # new keras 3 does not load saved models, but we can still load the metadata as a dictionary and find the layer name
             metadata_file = pathlib.Path(model_path) / 'keras_metadata.pb'
-            with open(metadata_file, encoding="utf-8", errors="ignore") as file:
-                metadata_str = file.readlines()
-            metadata_clean = '{' + metadata_str[1].split('{',1)[1].rsplit('}',1)[0] + '}'
-            metadata = json.loads(metadata_clean)
-            self.tf_config = metadata['model_config']['config']
-        else:
-            self.tf_config = self.full_model.get_config()
-        batch_input_shape = self.tf_config['layers'][0]['config']['batch_input_shape']['items']
-        self.img_size = batch_input_shape[1]
-        self.channels = batch_input_shape[3]
-        self.layer_order = [layer[0][:layer[0].find('_')] if layer[0].find('_') != -1 else layer[0] for layer in self.tf_config['output_layers']]
-        # load models for tagging and in
-        if tf.saved_model.contains_saved_model(model_path):
+            metadata = saved_metadata_pb2.SavedMetadata()
+            meta_graph_def = loader_impl.parse_saved_model(model_path).meta_graphs[0]
+            object_graph_def = meta_graph_def.object_graph_def
+            path_to_metadata_pb = metadata_file
+            with gfile.GFile(path_to_metadata_pb, 'rb') as f:
+                file_content = f.read()
+            metadata.ParseFromString(file_content)
+            md_root = [node for node in metadata.nodes if node.node_path=='root'][0]
+            self.tf_config = json.loads(md_root.metadata)['model_config']['config']
+            layer_name_to_path = dict((json.loads(node.metadata)['name'],node.node_path) for node in metadata.nodes)
+            batch_input_shape = self.tf_config['layers'][0]['config']['batch_input_shape']['items']
+            
+            # load models for tagging and in
             # Doesn't work in keras 3 (tensorflow >= 2.16)
             # self.full_model = tf.keras.models.load_model(model_path)
-            self.full_model = tf.saved_model.load(model_path)
-            # batch_input_shape = (None,224,224,3)
             input_layer = tf.keras.Input(shape=batch_input_shape[1:])
-            hidden_layer = tf.keras.layers.TFSMLayer(model_path, call_endpoint='serving_default')
-            outputs = hidden_layer(inputs=input_layer)
-            self.feature_model = tf.keras.Model(inputs=input_layer, outputs=outputs)
+            savedmodel_layer = tf.keras.layers.TFSMLayer(model_path, call_endpoint='serving_default')
+            outputs = savedmodel_layer(inputs=input_layer)
+            self.full_model = tf.keras.Model(inputs=input_layer, outputs=outputs)
+            # load saved model without keras layer info and tie it with dictionary to the layer's original name
+            saved_model = tf.saved_model.load(model_path)
+            hiddedn_input_layer = tf.keras.Input(shape=batch_input_shape[1:])
+            saved_hidden_layer_func = saved_model.__getattribute__(layer_name_to_path['feature_layer'].replace('root.',''))
+            saved_hidden_layer = tf.keras.layers.Lambda(saved_hidden_layer_func)
+            feature_outputs = saved_hidden_layer(hiddedn_input_layer)
+            self.feature_model = tf.keras.Model(inputs=hiddedn_input_layer, outputs=feature_outputs)
         else:
+            # load models for tagging and in
             self.full_model = tf.keras.models.load_model(model_path)
             input_layer = self.full_model.layers[0]
             hidden_layer = self.full_model.get_layer('feature_layer')
             self.feature_model = tf.keras.Model(inputs=input_layer.input, outputs=hidden_layer.output)
+            # load tf config for metadata on model
+            self.tf_config = self.full_model.get_config()
+            batch_input_shape = self.tf_config['layers'][0]['config']['batch_input_shape']['items']
+        self.img_size = batch_input_shape[1]
+        self.channels = batch_input_shape[3]
+        self.layer_order = [layer[0][:layer[0].find('_')] if layer[0].find('_') != -1 else layer[0] for layer in self.tf_config['output_layers']]
         
         # load multilabel binarizers for model
         self.mlbs = {}
@@ -137,15 +152,20 @@ class FurryImageModel:
             loaded_images = [self._normalize_func(img, normalized) for img in loaded_images]
         
         num_images = len(loaded_images)
-        images = tf.convert_to_tensor(loaded_images)
+        images = tf.stack(loaded_images)
         x = self.full_model.predict(images)
-        
+
         res = [[] for _ in range(num_images)]
-        for layer, result in zip(self.layer_order, x):
-            
+        # for layer, result in zip(self.layer_order, x):
+        for ind, layer in enumerate(self.layer_order):
+            if self.contains_saved_model:
+                # for some reason x called from TFSMLayer is in the form dict[layer_name:output].
+                result = x[layer]
+            else:
+                # the nth of x is the layer in order
+                result = x[ind]
             if layer == 'rating':
                 out = [[{'tag': self._get_rating(r[0]), 'value': float(r[0]), 'category': layer}] for r in result]
-                
             else:
                 result = np.array(result)
                 result_mask = np.where(result > t, 1, 0)
@@ -156,8 +176,6 @@ class FurryImageModel:
                 values = [result[i, np.where(result_mask[i])][0] for i in range(num_images)]
 
                 out = [[{'tag': t, 'value': float(v), 'category': layer} for t,v in zip(t_list, v_list)] for t_list, v_list in zip(tags, values)]
-            
-
             for i in range(num_images):
                 res[i].extend(out[i])
 
