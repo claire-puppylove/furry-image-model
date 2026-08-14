@@ -5,9 +5,9 @@ Hey there! This is my project on labeling furry artwork!
 
 ## How To Use
 
-1. Create a python enviornment using your favorite flavor of enviornment creation (venv, conda, etc).
-2. Use `pip install -r requirements.txt` in the root directory of this project to install all dependencies required for this project.
-3. Follow [the appropriate steps](https://www.tensorflow.org/install/pip) for installing GPU accelerated TensorFlow (if necessary).
+1. Install [poetry](https://python-poetry.org/). Alternatively, create a python enviornment using your favorite flavor of enviornment creation (venv, conda, etc).
+2. Follow [the appropriate steps](https://www.tensorflow.org/install/pip) for installing GPU accelerated TensorFlow (if necessary).
+2. Use `poetry install` or `poetry install[gpu]` in the root directory of this project to install all dependencies required for this project, depending if you intend to use GPU acceleration. Alternatively use `pip install .` if you prefer not to use poetry.
 4. Download a model from the Model List (below).
 5. Try out the [Jupyter Notebook](./example_usage.ipynb) to see how to use this project!
 
@@ -69,3 +69,4 @@ A couple of Q&A for problems:
 - Finish README
 - Add more usable models
 - Develop a testing procedure to evaluate how a model performs on furry artwork.
+

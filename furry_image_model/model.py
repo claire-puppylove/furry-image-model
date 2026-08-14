@@ -1,10 +1,11 @@
 import os
 import typing
-
+import json
 import pathlib
 import numpy as np
 import tensorflow as tf
 from sklearn.preprocessing import MultiLabelBinarizer
+
 
 file_path = pathlib.Path(__file__).parent.resolve()
 
@@ -15,18 +16,37 @@ class FurryImageModel:
         Args:
             model_path (str | os.PathLike): The path of the TensorFlow SavedModel model.
         """
-        
-        # load models for tagging and in
-        self.full_model = tf.keras.models.load_model(model_path)
-        input_layer = self.full_model.layers[0]
-        hidden_layer = self.full_model.get_layer('feature_layer')
-        self.feature_model = tf.keras.Model(inputs=input_layer.input, outputs=hidden_layer.output)
-
         # load tf config for metadata on model
-        self.tf_config = self.full_model.get_config()
-        self.img_size = self.tf_config['layers'][0]['config']['batch_input_shape'][1]
-        self.channels = self.tf_config['layers'][0]['config']['batch_input_shape'][3]
+        if tf.saved_model.contains_saved_model(model_path):
+            # new keras 3 does not load saved models, but we can still load the metadata as
+            # JSON from the keras_metadata.pb
+            metadata_file = pathlib.Path(model_path) / 'keras_metadata.pb'
+            with open(metadata_file, encoding="utf-8", errors="ignore") as file:
+                metadata_str = file.readlines()
+            metadata_clean = '{' + metadata_str[1].split('{',1)[1].rsplit('}',1)[0] + '}'
+            metadata = json.loads(metadata_clean)
+            self.tf_config = metadata['model_config']['config']
+        else:
+            self.tf_config = self.full_model.get_config()
+        batch_input_shape = self.tf_config['layers'][0]['config']['batch_input_shape']['items']
+        self.img_size = batch_input_shape[1]
+        self.channels = batch_input_shape[3]
         self.layer_order = [layer[0][:layer[0].find('_')] if layer[0].find('_') != -1 else layer[0] for layer in self.tf_config['output_layers']]
+        # load models for tagging and in
+        if tf.saved_model.contains_saved_model(model_path):
+            # Doesn't work in keras 3 (tensorflow >= 2.16)
+            # self.full_model = tf.keras.models.load_model(model_path)
+            self.full_model = tf.saved_model.load(model_path)
+            # batch_input_shape = (None,224,224,3)
+            input_layer = tf.keras.Input(shape=batch_input_shape[1:])
+            hidden_layer = tf.keras.layers.TFSMLayer(model_path, call_endpoint='serving_default')
+            outputs = hidden_layer(inputs=input_layer)
+            self.feature_model = tf.keras.Model(inputs=input_layer, outputs=outputs)
+        else:
+            self.full_model = tf.keras.models.load_model(model_path)
+            input_layer = self.full_model.layers[0]
+            hidden_layer = self.full_model.get_layer('feature_layer')
+            self.feature_model = tf.keras.Model(inputs=input_layer.input, outputs=hidden_layer.output)
         
         # load multilabel binarizers for model
         self.mlbs = {}

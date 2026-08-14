@@ -1,0 +1,24 @@
+[project]
+name = "furry-image-model"
+version = "0.2.0"
+description = "A model for tagging furry artwork"
+authors = [
+    {name = "zenitho-o",email = "zenith@pawgge.rs"},
+    {name = "claire-puppylove",email = "claire.puppylove.model@gmail.com"}
+]
+license = {text = "MIT"}
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "tensorflow (>=2.21.0,<3.0.0) ; extra != \"gpu\"",
+    "scikit-learn (>=1.9.0,<2.0.0)"
+]
+
+[project.optional-dependencies]
+gpu = ["tensorflow[and-cuda] (>=2.21.0,<3.0.0) ; extra == \"gpu\""]
+visual = ["pillow (>=12.3.0,<13.0.0)", "matplotlib (>=3.11.1,<4.0.0)"]
+interactive = ["ipython (>=9.16.1,<10.0.0)"]
+
+[build-system]
+requires = ["poetry-core>=2.0.0,<3.0.0"]
+build-backend = "poetry.core.masonry.api"
