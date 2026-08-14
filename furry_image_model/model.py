@@ -99,13 +99,19 @@ class FurryImageModel:
         # Read an image from a file
         image_string = tf.io.read_file(str(img_path))
         # Decode it into a dense vector
-        image_decoded = tf.image.decode_jpeg(image_string, channels=self.channels)
+        # Decode it into a dense vector
+        image_decoded = tf.image.decode_image(
+            image_string,
+            channels=self.channels,
+            expand_animations=True,
+            )
         # Resize it to fixed shape
         image_resized = tf.image.resize(image_decoded, [self.img_size, self.img_size])
         # Normalize it from [0, 255] to [0.0, 1.0]
         image_normalized = image_resized / 255.0
-        
-        return image_normalized
+        ## adding gif or webp usability take 4D tensors and disguise them as batches of 3D tensors
+        image_4d = tf.reshape(image_normalized,[-1,self.img_size,self.img_size,self.channels])
+        return image_4d
 
     def _get_rating(self, value: float):
         if value >= self.explicit_threshold:
@@ -148,14 +154,26 @@ class FurryImageModel:
             raise ValueError('The threshold must be within [0.0, 1.0]')
         
         loaded_images = [self._load_image(img) for img in img_path]
+        # loaded as 4d, flatten to list of 3d, keep information of frames>1 index
+        num_frames_per_image = [len(img) for img in loaded_images]
+        loaded_frames = []
+        frame_to_img_index = {}
+        frame_ind = 0
+        for image_ind, load_img in enumerate(loaded_images):
+            img_frames = tf.unstack(load_img)
+            loaded_frames.extend(img_frames)
+            for i, frame in enumerate(img_frames):
+                frame_to_img_index[frame_ind]={'image_num':image_ind,'frame_num':i+1}
+                frame_ind+=1
         if normalized:
-            loaded_images = [self._normalize_func(img, normalized) for img in loaded_images]
+            loaded_frames = [self._normalize_func(img, normalized) for img in loaded_frames]
         
         num_images = len(loaded_images)
-        images = tf.stack(loaded_images)
-        x = self.full_model.predict(images)
+        total_num_frames = len(loaded_frames)
+        frames = tf.stack(loaded_frames)
+        x = self.full_model.predict(frames)
 
-        res = [[] for _ in range(num_images)]
+        res = [{'num_frames':num_f,'r':[{'frame':i_f+1, 'fr':[]} for i_f in range(num_f)]} for num_f in num_frames_per_image]
         # for layer, result in zip(self.layer_order, x):
         for ind, layer in enumerate(self.layer_order):
             if self.contains_saved_model:
@@ -164,8 +182,17 @@ class FurryImageModel:
             else:
                 # the nth of x is the layer in order
                 result = x[ind]
+            assert len(result) == total_num_frames
+            
             if layer == 'rating':
-                out = [[{'tag': self._get_rating(r[0]), 'value': float(r[0]), 'category': layer}] for r in result]
+                for i_frame, r in enumerate(result):
+                    current_f = frame_to_img_index[i_frame]['frame_num']
+                    current_img = frame_to_img_index[i_frame]['image_num']
+                    out = [{'tag': self._get_rating(r[0]),
+                            'value': float(r[0]),
+                            'category': layer,
+                            }]
+                    res[current_img]['r'][current_f-1]['fr'].extend(out)
             else:
                 result = np.array(result)
                 result_mask = np.where(result > t, 1, 0)
@@ -173,11 +200,17 @@ class FurryImageModel:
                 
                 mlb: MultiLabelBinarizer
                 tags = mlb.inverse_transform(result_mask)
-                values = [result[i, np.where(result_mask[i])][0] for i in range(num_images)]
-
-                out = [[{'tag': t, 'value': float(v), 'category': layer} for t,v in zip(t_list, v_list)] for t_list, v_list in zip(tags, values)]
-            for i in range(num_images):
-                res[i].extend(out[i])
+                values = [result[i, np.where(result_mask[i])][0] for i in range(total_num_frames)]
+                for i_frame,(t_list, v_list) in enumerate(zip(tags, values)):
+                    current_f = frame_to_img_index[i_frame]['frame_num']
+                    current_img = frame_to_img_index[i_frame]['image_num']
+                    out = [{'tag': t,
+                             'value': float(v),
+                             'category': layer,
+                            }
+                            for t,v in zip(t_list, v_list)
+                        ]
+                    res[current_img]['r'][current_f-1]['fr'].extend(out)
 
         return res
         
@@ -185,7 +218,7 @@ class FurryImageModel:
     def image_latent_vector(self, *img_path: typing.Union[str, os.PathLike]) -> np.ndarray:
         """Get the feature vector representation of an image.
         
-        NOTE: The output array will be shaped (N, D), where N is the # of images, and D 
+        NOTE: The output array will be shaped (N, D), where N is the flattened # of frames in all images, and D 
         is the dimension of the feature vector.
 
         Args:
@@ -198,6 +231,11 @@ class FurryImageModel:
             raise ValueError('There must be at least one image given.')
 
         loaded_images = [self._load_image(img) for img in img_path]
+        # loaded as 4d, flatten to list of 3d
+        loaded_frames = []
+        for load_img in loaded_images:
+            img_frames = tf.unstack(load_img)
+            loaded_frames.extend(img_frames)
         
-        res = self.feature_model.predict(tf.convert_to_tensor(loaded_images))
+        res = self.feature_model.predict(tf.stack(loaded_frames))
         return np.array(res)
